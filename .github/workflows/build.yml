@@ -1,21 +1,79 @@
-name: Build APK
+name: Build Munawar AI APK
+
 on:
   push:
+  pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Finds the folder that contains settings.gradle, even if the project
+      # was uploaded inside a sub-folder (e.g. MunawarAI/).
+      - name: Find project folder
+        id: root
+        run: |
+          f=$(find . -name settings.gradle -not -path './.git/*' | head -n1)
+          if [ -z "$f" ]; then f=$(find . -name settings.gradle.kts -not -path './.git/*' | head -n1); fi
+          if [ -z "$f" ]; then echo "ERROR: settings.gradle not found in repo"; ls -R | head -50; exit 1; fi
+          dir=$(dirname "$f")
+          echo "Project folder: $dir"
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+          ls -la "$dir"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
-      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Set up Android SDK (accepts licenses)
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools platforms;android-34 build-tools;34.0.0"
+
+      - name: Set up Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.7
-      - run: gradle assembleDebug --no-daemon
-      - uses: actions/upload-artifact@v4
+
+      - name: Build debug APK
+        working-directory: ${{ steps.root.outputs.dir }}
+        run: |
+          set -o pipefail
+          gradle assembleDebug --no-daemon --stacktrace --console=plain 2>&1 | tee build.log
+
+      - name: Show errors (only if build failed)
+        if: failure()
+        working-directory: ${{ steps.root.outputs.dir }}
+        run: |
+          grep -nE "^e: |error:|What went wrong|Execution failed|Could not" -A4 build.log | head -n 150 || true
+
+      - name: Upload build log (only if build failed)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: ${{ steps.root.outputs.dir }}/build.log
+          if-no-files-found: ignore
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
         with:
           name: MunawarAI-debug-apk
-          path: app/build/outputs/apk/debug/*.apk
+          path: ${{ steps.root.outputs.dir }}/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+      - name: Attach APK to Release (only for tags like v1.0)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.root.outputs.dir }}/app/build/outputs/apk/debug/*.apk
